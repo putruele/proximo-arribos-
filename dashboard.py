@@ -72,26 +72,58 @@ st.markdown("""
 # Archivo de datos consolidado
 DATA_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "datos_consolidados.csv")
 
+def parse_numeric_value(val):
+    if pd.isna(val):
+        return 0.0
+    if isinstance(val, (int, float)):
+        return float(val)
+    val_str = str(val).strip().replace('$', '').replace(' ', '')
+    if not val_str:
+        return 0.0
+    if ',' in val_str and '.' in val_str:
+        if val_str.find('.') < val_str.find(','):
+            val_str = val_str.replace('.', '').replace(',', '.')
+        else:
+            val_str = val_str.replace(',', '')
+    elif ',' in val_str:
+        val_str = val_str.replace(',', '.')
+    try:
+        return float(val_str)
+    except:
+        return 0.0
+
 # Función para cargar datos (soporta lectura en la nube de Google Sheets con fallback local)
 @st.cache_data(ttl=300)
 def load_data(gsheet_url, file_mtime):
+    df = None
     if gsheet_url:
         try:
             # Forzar la carga mediante pandas leyendo la URL del export del sheet
             df = pd.read_csv(gsheet_url)
-            df['fecha'] = pd.to_datetime(df['fecha'])
-            return df
         except Exception as e:
             st.warning(f"No se pudo cargar desde Google Sheets ({e}). Cargando archivo local...")
             
     # Fallback local
-    if os.path.exists(DATA_PATH):
+    if df is None and os.path.exists(DATA_PATH):
         try:
             df = pd.read_csv(DATA_PATH)
-            df['fecha'] = pd.to_datetime(df['fecha'])
-            return df
         except Exception as e:
             st.error(f"Error al leer consolidado local: {e}")
+            
+    if df is not None:
+        try:
+            df['fecha'] = pd.to_datetime(df['fecha'])
+            numeric_cols = [
+                'kg_unitario', 'cantidad', 'costo_final_unitario', 'costo_por_kilo',
+                'kilos_totales', 'costo_final_total'
+            ]
+            for col in numeric_cols:
+                if col in df.columns:
+                    df[col] = df[col].apply(parse_numeric_value)
+            return df
+        except Exception as e:
+            st.error(f"Error al procesar tipos de datos: {e}")
+            
     return None
 
 # Función para persistir nuevas filas (soporta Google Sheets via Apps Script Web App o localmente en el CSV)

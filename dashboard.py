@@ -598,20 +598,20 @@ else:
     min_date = df['fecha'].min().date()
     max_date = df['fecha'].max().date()
     
-    # Por defecto, el rango de arranque empieza el 1 de enero del año en curso
+    # Rango por defecto: del 1 de enero del año en curso a la fecha máxima de datos
     current_year = datetime.now().year
     start_default = date(current_year, 1, 1)
+    
+    # Si por alguna razón el primer día del año es posterior a la fecha máxima del CSV, caparlo al min_date
     if start_default > max_date:
-        start_default = min_date
-    elif start_default < min_date:
         start_default = min_date
         
     st.sidebar.subheader("Rango de Fechas")
     date_range = st.sidebar.date_input(
         "Selecciona el período",
         value=(start_default, max_date),
-        min_value=min_date,
-        max_value=max_date
+        min_value=date(current_year - 2, 1, 1), # Permite ir hacia atrás hasta 2 años
+        max_value=date(current_year + 1, 12, 31) # Permite ir hacia adelante hasta 1 año
     )
     
     # Filtro de Productos (Artículo)
@@ -712,96 +712,165 @@ else:
         
     st.markdown("<br>", unsafe_allow_html=True)
 
-    # ------------------ ACCIONES Y TABLA DE DETALLES ------------------
-    col_title, col_btn = st.columns([3, 1])
+    # Crear pestañas para organizar la información de forma premium
+    tab_tabla, tab_graficos = st.tabs(["📋 Detalle de Arribos", "📊 Estadísticas y Tendencias"])
     
-    with col_title:
-        st.subheader("📋 Detalle de Arribos Seleccionados")
+    with tab_tabla:
+        # Buscador Global Rápido arriba de la tabla
+        search_query = st.text_input("🔍 Búsqueda rápida (Factura, Guía, Proveedor, Producto...)", placeholder="Escribe para filtrar las filas de la grilla en tiempo real...")
         
-    with col_btn:
-        if not filtered_df.empty:
-            # Generar Excel en memoria
-            excel_data = convert_df_to_excel(filtered_df)
+        table_df = filtered_df.copy()
+        if search_query:
+            q = search_query.strip().lower()
+            table_df = table_df[
+                table_df['nro_fc'].astype(str).str.lower().str.contains(q, na=False) |
+                table_df['guia'].astype(str).str.lower().str.contains(q, na=False) |
+                table_df['proveedor'].astype(str).str.lower().str.contains(q, na=False) |
+                table_df['articulo_original'].astype(str).str.lower().str.contains(q, na=False)
+            ]
             
-            st.download_button(
-                label="📥 Exportar a Excel",
-                data=excel_data,
-                file_name=f"arribos_filtrados_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                use_container_width=True
-            )
-        else:
-            st.button("📥 Exportar a Excel (Sin datos)", disabled=True, use_container_width=True)
-
-    # Mostrar la tabla interactiva
-    if filtered_df.empty:
-        st.info("No se encontraron registros con los filtros seleccionados.")
-    else:
-        # Seleccionar y ordenar las columnas exactamente como se muestra en la captura del usuario
-        cols_to_display = [
-            'fecha', 'proveedor', 'nro_fc', 'guia', 
-            'articulo_producto', 'articulo_variedad',
-            'kg_unitario', 'cantidad', 'costo_final_unitario',
-            'costo_por_kilo', 'kilos_totales', 'costo_final_total'
-        ]
-        display_df = filtered_df[cols_to_display].copy()
+        # ------------------ ACCIONES Y TABLA DE DETALLES ------------------
+        col_title, col_btn = st.columns([3, 1])
         
-        # Resetear el índice a 0-based para sincronizar correctamente con los índices de selección de Streamlit
-        display_df = display_df.reset_index(drop=True)
-        
-        # Renombrar columnas para coincidir exactamente con los encabezados deseados
-        display_df = display_df.rename(columns={
-            'fecha': 'Fecha',
-            'proveedor': 'Proveedor',
-            'nro_fc': 'Factura',
-            'guia': 'Guía/Lote',
-            'articulo_producto': 'Producto',
-            'articulo_variedad': 'Variedad',
-            'kg_unitario': 'Kg/Bulto',
-            'cantidad': 'Bultos',
-            'costo_final_unitario': 'Costo Final Unit.',
-            'costo_por_kilo': 'Costo por Kilo',
-            'kilos_totales': 'Total Kilos',
-            'costo_final_total': 'Costo Final Total'
-        })
-        
-        # Obtener filas seleccionadas desde el session_state para colorear la fila completa
-        selected_rows = []
-        if "arribos_grid" in st.session_state:
-            grid_state = st.session_state["arribos_grid"]
-            if "selection" in grid_state and "rows" in grid_state["selection"]:
-                selected_rows = grid_state["selection"]["rows"]
+        with col_title:
+            st.subheader("📋 Detalle de Arribos Seleccionados")
+            
+        with col_btn:
+            if not table_df.empty:
+                # Generar Excel en memoria
+                excel_data = convert_df_to_excel(table_df)
                 
-        # Función para aplicar estilos dinámicos a la fila completa y columnas específicas
-        def style_rows(row):
-            styles = [''] * len(row)
-            if row.name in selected_rows:
-                # Pintar toda la fila seleccionada con un color azul brillante y texto claro
-                return ['background-color: #2563eb; color: white; font-weight: bold'] * len(row)
+                st.download_button(
+                    label="📥 Exportar a Excel",
+                    data=excel_data,
+                    file_name=f"arribos_filtrados_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True
+                )
+            else:
+                st.button("📥 Exportar a Excel (Sin datos)", disabled=True, use_container_width=True)
+
+        # Mostrar la tabla interactiva
+        if table_df.empty:
+            st.info("No se encontraron registros con los filtros seleccionados.")
+        else:
+            # Seleccionar y ordenar las columnas exactamente como se muestra en la captura del usuario
+            cols_to_display = [
+                'fecha', 'proveedor', 'nro_fc', 'guia', 
+                'articulo_producto', 'articulo_variedad',
+                'kg_unitario', 'cantidad', 'costo_final_unitario',
+                'costo_por_kilo', 'kilos_totales', 'costo_final_total'
+            ]
+            display_df = table_df[cols_to_display].copy()
             
-            # Si no está seleccionada, aplicar el color azul marino en las columnas de Costo Final Unit. (idx 8) y Costo por Kilo (idx 9)
-            styles[8] = 'background-color: #1E3A8A; color: white; font-weight: bold'
-            styles[9] = 'background-color: #1E3A8A; color: white; font-weight: bold'
-            return styles
+            # Resetear el índice a 0-based para sincronizar correctamente con los índices de selección de Streamlit
+            display_df = display_df.reset_index(drop=True)
             
-        styled_df = display_df.style.format({
-            'Fecha': lambda x: x.strftime('%Y-%m-%d') if not pd.isna(x) else '',
-            'Kg/Bulto': '{:.2f} kg',
-            'Bultos': '{:.0f}',
-            'Costo Final Unit.': '${:.2f}',
-            'Costo por Kilo': '${:.2f}',
-            'Total Kilos': '{:.2f} kg',
-            'Costo Final Total': lambda x: f"{x:,.2f}".replace(",", "x").replace(".", ",").replace("x", ".") + " $"
-        }).apply(style_rows, axis=1)
+            # Renombrar columnas para coincidir exactamente con los encabezados deseados
+            display_df = display_df.rename(columns={
+                'fecha': 'Fecha',
+                'proveedor': 'Proveedor',
+                'nro_fc': 'Factura',
+                'guia': 'Guía/Lote',
+                'articulo_producto': 'Producto',
+                'articulo_variedad': 'Variedad',
+                'kg_unitario': 'Kg/Bulto',
+                'cantidad': 'Bultos',
+                'costo_final_unitario': 'Costo Final Unit.',
+                'costo_por_kilo': 'Costo por Kilo',
+                'kilos_totales': 'Total Kilos',
+                'costo_final_total': 'Costo Final Total'
+            })
+            
+            # Obtener filas seleccionadas desde el session_state para colorear la fila completa
+            selected_rows = []
+            if "arribos_grid" in st.session_state:
+                grid_state = st.session_state["arribos_grid"]
+                if "selection" in grid_state and "rows" in grid_state["selection"]:
+                    selected_rows = grid_state["selection"]["rows"]
+                    
+            # Función para aplicar estilos dinámicos a la fila completa y columnas específicas
+            def style_rows(row):
+                styles = [''] * len(row)
+                if row.name in selected_rows:
+                    # Pintar toda la fila seleccionada con un color azul brillante y texto claro
+                    return ['background-color: #2563eb; color: white; font-weight: bold'] * len(row)
+                
+                # Si no está seleccionada, aplicar el color azul marino en las columnas de Costo Final Unit. (idx 8) y Costo por Kilo (idx 9)
+                styles[8] = 'background-color: #1E3A8A; color: white; font-weight: bold'
+                styles[9] = 'background-color: #1E3A8A; color: white; font-weight: bold'
+                return styles
+                
+            styled_df = display_df.style.format({
+                'Fecha': lambda x: x.strftime('%Y-%m-%d') if not pd.isna(x) else '',
+                'Kg/Bulto': '{:.2f} kg',
+                'Bultos': '{:.0f}',
+                'Costo Final Unit.': '${:.2f}',
+                'Costo por Kilo': '${:.2f}',
+                'Total Kilos': '{:.2f} kg',
+                'Costo Final Total': lambda x: f"{x:,.2f}".replace(",", "x").replace(".", ",").replace("x", ".") + " $"
+            }).apply(style_rows, axis=1)
+            
+            st.dataframe(
+                styled_df,
+                hide_index=True,
+                width="stretch",
+                on_select="rerun",
+                selection_mode="single-row",
+                key="arribos_grid"
+            )
+            
+    with tab_graficos:
+        st.subheader("📊 Estadísticas y Análisis de Tendencias")
         
-        st.dataframe(
-            styled_df,
-            hide_index=True,
-            width="stretch",
-            on_select="rerun",
-            selection_mode="single-row",
-            key="arribos_grid"
-        )
+        g_col1, g_col2 = st.columns(2)
+        
+        with g_col1:
+            st.markdown("##### ⚖️ Kilaje Total por Proveedor")
+            if not filtered_df.empty:
+                df_prov = filtered_df.groupby('proveedor')['kilos_totales'].sum().reset_index()
+                df_prov = df_prov.sort_values('kilos_totales', ascending=False)
+                df_prov = df_prov.rename(columns={'proveedor': 'Proveedor', 'kilos_totales': 'Kilos'})
+                st.bar_chart(df_prov, x='Proveedor', y='Kilos', color="#2563eb", height=300)
+            else:
+                st.info("Sin datos para el filtro seleccionado.")
+                
+        with g_col2:
+            st.markdown("##### 🍎 Kilos Totales por Producto")
+            if not filtered_df.empty:
+                df_prod = filtered_df.groupby('articulo_producto')['kilos_totales'].sum().reset_index()
+                df_prod = df_prod.sort_values('kilos_totales', ascending=False)
+                df_prod = df_prod.rename(columns={'articulo_producto': 'Producto', 'kilos_totales': 'Kilos'})
+                st.bar_chart(df_prod, x='Producto', y='Kilos', color="#10b981", height=300)
+            else:
+                st.info("Sin datos para el filtro seleccionado.")
+                
+        st.markdown("---")
+        
+        st.markdown("##### 🏷️ Historial de Costo por Kilo de Producto")
+        
+        # Filtrar los productos y datos históricos según el/los proveedor(es) seleccionado(s) en la barra lateral
+        df_by_prov = df.copy()
+        if selected_proveedores:
+            df_by_prov = df_by_prov[df_by_prov['proveedor'].isin(selected_proveedores)]
+            
+        all_products = sorted(df_by_prov['articulo_producto'].unique())
+        if all_products:
+            trend_product = st.selectbox(
+                "Selecciona un Producto para analizar su precio histórico en pesos ($)",
+                options=all_products,
+                key="trend_prod_select"
+            )
+            df_trend = df_by_prov[df_by_prov['articulo_producto'] == trend_product].copy()
+            df_trend = df_trend.sort_values('fecha')
+            if not df_trend.empty:
+                df_trend_group = df_trend.groupby(df_trend['fecha'].dt.date)['costo_por_kilo'].mean().reset_index()
+                df_trend_group = df_trend_group.rename(columns={'fecha': 'Fecha', 'costo_por_kilo': 'Costo por Kilo ($)'})
+                st.line_chart(df_trend_group, x='Fecha', y='Costo por Kilo ($)', color="#ef4444", height=350)
+            else:
+                st.info("Sin registros de costos para este producto y proveedor(es).")
+        else:
+            st.info("Sin productos registrados para el/los proveedor(es) seleccionado(s).")
         
     # Información del pie de página
     st.markdown("---")

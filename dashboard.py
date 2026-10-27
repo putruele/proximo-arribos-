@@ -136,16 +136,39 @@ def save_new_rows(new_rows_df):
         'articulo_producto', 'articulo_variedad', 'kilos_totales', 'costo_final_total'
     ]
     new_rows_df = new_rows_df[db_cols].copy()
-    new_rows_df['fecha'] = new_rows_df['fecha'].dt.strftime('%Y-%m-%d')
+    
+    # 1. Sanitizar fecha
+    if pd.api.types.is_datetime64_any_dtype(new_rows_df['fecha']):
+        new_rows_df['fecha'] = new_rows_df['fecha'].dt.strftime('%Y-%m-%d')
+    new_rows_df['fecha'] = new_rows_df['fecha'].fillna('-').astype(str)
+    new_rows_df.loc[new_rows_df['fecha'].isin(['nan', 'None', '', 'NaT', '-']), 'fecha'] = datetime.now().strftime('%Y-%m-%d')
+    
+    # 2. Sanitizar texto
+    str_cols = ['nro_fc', 'guia', 'articulo_original', 'proveedor', 'archivo_origen', 'articulo_producto', 'articulo_variedad']
+    for sc in str_cols:
+        if sc in new_rows_df.columns:
+            new_rows_df[sc] = new_rows_df[sc].fillna('-').astype(str).str.strip()
+            new_rows_df.loc[new_rows_df[sc].isin(['nan', 'None', '']), sc] = '-'
+            
+    # 3. Sanitizar números (nunca enviar NaN a JSON)
+    num_cols = ['kg_unitario', 'cantidad', 'costo_final_unitario', 'costo_por_kilo', 'kilos_totales', 'costo_final_total']
+    for nc in num_cols:
+        if nc in new_rows_df.columns:
+            new_rows_df[nc] = pd.to_numeric(new_rows_df[nc], errors='coerce').fillna(0.0)
     
     if apps_script_url:
         try:
             rows_to_send = new_rows_df.values.tolist()
-            response = requests.post(apps_script_url, data=json.dumps(rows_to_send))
-            if response.status_code == 200 and response.text == "Success":
+            # allow_nan=False asegura cumplimiento estricto del estándar JSON
+            payload = json.dumps(rows_to_send, allow_nan=False)
+            response = requests.post(apps_script_url, data=payload)
+            if response.status_code == 200 and response.text.strip() == "Success":
                 return True
             else:
-                st.error(f"Error del Apps Script: {response.text}")
+                resp_text = response.text.strip()
+                m = re.search(r'<div[^>]*style="[^"]*monospace[^"]*"[^>]*>(.*?)</div>', resp_text, re.DOTALL)
+                clean_err = m.group(1).strip() if m else resp_text[:300]
+                st.error(f"Error del Apps Script: {clean_err}")
                 return False
         except Exception as e:
             st.error(f"Error al conectar con Google Sheets: {e}")

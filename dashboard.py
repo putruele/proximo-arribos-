@@ -1,5 +1,6 @@
 import os
 import io
+import re
 import json
 import requests
 import pandas as pd
@@ -169,23 +170,45 @@ def clean_header_name(h):
         return ""
     return " ".join(str(h).split()).upper().strip()
 
+def clean_str_field(series):
+    s = series.fillna('-').astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
+    return s.replace({'nan': '-', 'None': '-', '': '-', 'NaN': '-', '<NA>': '-'})
+
+def parse_date_series(series):
+    def _parse_val(val):
+        if pd.isna(val) or val is None or val == '' or str(val).strip().lower() in ['nan', 'none', '-']:
+            return pd.NaT
+        if isinstance(val, (datetime, pd.Timestamp)):
+            return pd.to_datetime(val)
+        try:
+            fval = float(str(val).strip())
+            if 30000 <= fval <= 70000:
+                return pd.to_datetime(fval, unit='D', origin='1899-12-30')
+        except (ValueError, TypeError):
+            pass
+        return pd.to_datetime(val, errors='coerce', dayfirst=True)
+    return series.apply(_parse_val)
+
 def map_and_clean_df(df):
     if df.empty:
         return pd.DataFrame()
         
     mapped_df = pd.DataFrame()
-    cols = df.columns
+    cols = list(df.columns)
     
+    # 1. FECHA
     col_fecha = [c for c in cols if 'FECHA' in c or 'DATE' in c]
     if col_fecha:
         mapped_df['fecha'] = df[col_fecha[0]]
     else:
         mapped_df['fecha'] = pd.Series([None]*len(df))
         
-    import re
+    # 2. FACTURA (FC)
     col_fc = []
     for c in cols:
-        if re.search(r'\bFC\b|\bFC\W|FACTURA|INVOICE', c):
+        if any(k in c for k in ['FLETE', 'DESC', 'INTER', 'SEGURO']):
+            continue
+        if re.search(r'(?:^|\W|N[°º.]*)FC(?:$|\W)|FACTURA|INVOICE', c):
             col_fc.append(c)
             break
     if col_fc:
@@ -193,21 +216,34 @@ def map_and_clean_df(df):
     else:
         mapped_df['nro_fc'] = pd.Series([None]*len(df))
         
+    # 3. GUIA / LOTE
     col_guia = [c for c in cols if 'GUIA' in c or 'LOTE' in c or 'TRACKING' in c]
     if col_guia:
         mapped_df['guia'] = df[col_guia[0]]
     else:
         mapped_df['guia'] = pd.Series([None]*len(df))
         
-    col_art = [c for c in cols if 'ARTICULO' in c or 'PRODUCTO' in c or 'PRODUCT' in c or 'ITEM' in c]
+    # 4. ARTICULO / VARIEDAD / PRODUCTO
+    col_art = None
+    for c in cols:
+        if any(k in c for k in ['PALET', 'PALLET', 'SEGURO', 'INTER', 'FLETE', 'COSTO', 'TOTAL', 'PRECIO', 'GASTOS', 'DESC', 'COMISION', 'LUGAR', 'ANALISIS', 'EMB']):
+            continue
+        if c in ['ARTICULO VARIEDAD', 'ARTICULO', 'VARIEDAD', 'PRODUCTO', 'DESCRIPCION', 'ITEM', 'MERCADERIA']:
+            col_art = c
+            break
+        if 'ARTICULO' in c or 'VARIEDAD' in c or (('PRODUCTO' in c or 'PRODUCT' in c) and 'X' not in c and 'SEG' not in c):
+            col_art = c
+            break
+            
     if col_art:
-        mapped_df['articulo_original'] = df[col_art[0]]
+        mapped_df['articulo_original'] = df[col_art]
     else:
         mapped_df['articulo_original'] = pd.Series([None]*len(df))
         
+    # 5. KG UNITARIO
     col_kg = []
     for c in cols:
-        if ('KG' in c or 'KILO' in c) and not any(k in c for k in ['COSTO', 'PRECIO', 'PESOS', 'PAGAR']):
+        if ('KG' in c or 'KILO' in c) and not any(k in c for k in ['COSTO', 'PRECIO', 'PESOS', 'PAGAR', 'FOB', 'FINAL']):
             col_kg.append(c)
             break
     if col_kg:
@@ -215,12 +251,14 @@ def map_and_clean_df(df):
     else:
         mapped_df['kg_unitario'] = pd.Series([None]*len(df))
         
-    col_cant = [c for c in cols if 'CANT' in c or 'QTY' in c or 'CANTIDAD' in c]
+    # 6. CANTIDAD / BULTOS
+    col_cant = [c for c in cols if 'CANT' in c or 'QTY' in c or 'CANTIDAD' in c or 'BULTOS' in c]
     if col_cant:
         mapped_df['cantidad'] = df[col_cant[0]]
     else:
         mapped_df['cantidad'] = pd.Series([None]*len(df))
         
+    # 7. COSTO FINAL UNITARIO
     col_costo = []
     for c in cols:
         if 'COSTO FINAL' in c and 'KILO' not in c and 'PESOS' in c:
@@ -228,7 +266,7 @@ def map_and_clean_df(df):
             break
     if not col_costo:
         for c in cols:
-            if 'COSTO' in c and 'PESOS' in c and 'KILO' not in c:
+            if 'COSTO' in c and 'PESOS' in c and 'KILO' not in c and 'INTERN' not in c:
                 col_costo.append(c)
                 break
     if col_costo:
@@ -236,6 +274,7 @@ def map_and_clean_df(df):
     else:
         mapped_df['costo_final_unitario'] = pd.Series([None]*len(df))
         
+    # 8. COSTO POR KILO
     col_costo_kilo = []
     for c in cols:
         if 'KILO' in c and 'COSTO' in c and 'PESOS' in c:
@@ -246,32 +285,43 @@ def map_and_clean_df(df):
             if 'KILO' in c and 'COSTO' in c and not any(x in c for x in ['USD', 'FOB', 'FLETE']):
                 col_costo_kilo.append(c)
                 break
-    if not col_costo_kilo:
-        for c in cols:
-            if 'KILO' in c and ('COSTO' in c or 'PRECIO' in c or 'VALOR' in c):
-                col_costo_kilo.append(c)
-                break
     if col_costo_kilo:
         mapped_df['costo_por_kilo'] = df[col_costo_kilo[0]]
     else:
         mapped_df['costo_por_kilo'] = pd.Series([None]*len(df))
 
-    mapped_df['proveedor'] = df['_proveedor'] if '_proveedor' in df.columns else 'DESCONOCIDO'
+    # 9. PROVEEDOR & ARCHIVO
+    col_prov = [c for c in cols if 'PROVEEDOR' in c and 'EMB' not in c and 'NRO' not in c]
+    if col_prov and not df[col_prov[0]].dropna().empty:
+        mapped_df['proveedor'] = df[col_prov[0]]
+    elif '_proveedor' in df.columns:
+        mapped_df['proveedor'] = df['_proveedor']
+    else:
+        mapped_df['proveedor'] = 'DESCONOCIDO'
+        
     mapped_df['archivo_origen'] = df['_archivo'] if '_archivo' in df.columns else ''
     
+    # Forward-fill fecha y nro_fc dentro de la solapa
     mapped_df['fecha'] = mapped_df['fecha'].ffill()
     mapped_df['nro_fc'] = mapped_df['nro_fc'].ffill()
     
-    mapped_df['fecha'] = pd.to_datetime(mapped_df['fecha'], errors='coerce')
+    # Parse date series
+    mapped_df['fecha'] = parse_date_series(mapped_df['fecha'])
+    
+    # Numeric conversions
     mapped_df['kg_unitario'] = pd.to_numeric(mapped_df['kg_unitario'], errors='coerce').fillna(0.0)
     mapped_df['cantidad'] = pd.to_numeric(mapped_df['cantidad'], errors='coerce').fillna(0.0)
     mapped_df['costo_final_unitario'] = pd.to_numeric(mapped_df['costo_final_unitario'], errors='coerce').fillna(0.0)
     mapped_df['costo_por_kilo'] = pd.to_numeric(mapped_df['costo_por_kilo'], errors='coerce').fillna(0.0)
     
-    mapped_df['guia'] = mapped_df['guia'].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
-    mapped_df.loc[mapped_df['guia'].isin(['nan', 'None', '']), 'guia'] = '-'
-    mapped_df['nro_fc'] = mapped_df['nro_fc'].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
-    mapped_df.loc[mapped_df['nro_fc'].isin(['nan', 'None', '']), 'nro_fc'] = '-'
+    # Strings
+    mapped_df['guia'] = clean_str_field(mapped_df['guia'])
+    mapped_df['nro_fc'] = clean_str_field(mapped_df['nro_fc'])
+    
+    # Filter empty / null article rows
+    mapped_df = mapped_df.dropna(subset=['articulo_original'])
+    mapped_df = mapped_df[mapped_df['articulo_original'].astype(str).str.strip() != '']
+    mapped_df = mapped_df[~mapped_df['articulo_original'].astype(str).str.strip().str.upper().isin(['NAN', 'NONE', '-'])]
     
     def parse_article(desc):
         if not desc or pd.isna(desc):
@@ -292,7 +342,6 @@ def map_and_clean_df(df):
     mask_cero_kilo = (mapped_df['costo_por_kilo'] == 0.0) & (mapped_df['kg_unitario'] > 0.0)
     mapped_df.loc[mask_cero_kilo, 'costo_por_kilo'] = mapped_df['costo_final_unitario'] / mapped_df['kg_unitario']
     
-    mapped_df = mapped_df.dropna(subset=['articulo_original'])
     return mapped_df
 
 def read_excel_in_memory(uploaded_file):
@@ -308,10 +357,24 @@ def read_excel_in_memory(uploaded_file):
                 sheet = book.sheet_by_name(sheet_name)
                 if sheet.nrows <= 1:
                     continue
-                headers = [clean_header_name(sheet.cell_value(0, col)) for col in range(sheet.ncols)]
+                # Buscar dinámicamente la fila de encabezado en las primeras 5 filas
+                header_row_idx = None
+                for r in range(min(5, sheet.nrows)):
+                    row_vals = [clean_header_name(sheet.cell_value(r, c)) for c in range(sheet.ncols)]
+                    if any('FECHA' in v or 'DATE' in v for v in row_vals):
+                        header_row_idx = r
+                        break
+                if header_row_idx is None:
+                    header_row_idx = 0
+                    
+                headers = [clean_header_name(sheet.cell_value(header_row_idx, col)) for col in range(sheet.ncols)]
+                if not any('FECHA' in h for h in headers) or not any('ARTICULO' in h or 'VARIEDAD' in h or 'PRODUCTO' in h for h in headers):
+                    continue
+                    
                 sheet_rows = []
-                for r in range(1, sheet.nrows):
+                for r in range(header_row_idx + 1, sheet.nrows):
                     row_dict = {'_proveedor': sheet_name.strip(), '_archivo': filename}
+                    has_data = False
                     for c in range(min(len(headers), sheet.ncols)):
                         col_name = headers[c]
                         if not col_name:
@@ -326,8 +389,10 @@ def read_excel_in_memory(uploaded_file):
                                 pass
                         elif ctype == xlrd.XL_CELL_EMPTY or val == '':
                             val = None
+                        if val is not None and str(val).strip() != '':
+                            has_data = True
                         row_dict[col_name] = val
-                    if any(v is not None for k, v in row_dict.items() if k not in ['_proveedor', '_archivo']):
+                    if has_data:
                         sheet_rows.append(row_dict)
                 if sheet_rows:
                     sheet_df = pd.DataFrame(sheet_rows)
@@ -344,21 +409,43 @@ def read_excel_in_memory(uploaded_file):
                 sheet = wb[sheet_name]
                 if sheet.max_row <= 1:
                     continue
-                headers = [clean_header_name(cell.value) for cell in sheet[1]]
+                # Buscar dinámicamente la fila de encabezado
+                header_row_idx = None
+                for r in range(1, min(6, sheet.max_row + 1)):
+                    row_vals = [clean_header_name(sheet.cell(row=r, column=c).value) for c in range(1, min(sheet.max_column + 1, 40))]
+                    if any('FECHA' in v or 'DATE' in v for v in row_vals):
+                        header_row_idx = r
+                        break
+                if header_row_idx is None:
+                    header_row_idx = 1
+                    
+                headers = [clean_header_name(sheet.cell(row=header_row_idx, column=c).value) for c in range(1, sheet.max_column + 1)]
+                if not any('FECHA' in h for h in headers) or not any('ARTICULO' in h or 'VARIEDAD' in h or 'PRODUCTO' in h for h in headers):
+                    continue
+                    
                 sheet_rows = []
-                for r in range(2, sheet.max_row + 1):
+                consecutive_empty = 0
+                for r in range(header_row_idx + 1, sheet.max_row + 1):
                     row_dict = {'_proveedor': sheet_name.strip(), '_archivo': filename}
+                    has_data = False
                     for c in range(1, len(headers) + 1):
                         col_name = headers[c-1]
                         if not col_name:
                             continue
-                        cell = sheet.cell(row=r, column=c)
-                        val = cell.value
+                        val = sheet.cell(row=r, column=c).value
                         if val == '':
                             val = None
+                        if val is not None and str(val).strip() != '':
+                            has_data = True
                         row_dict[col_name] = val
-                    if any(v is not None for k, v in row_dict.items() if k not in ['_proveedor', '_archivo']):
+                    if has_data:
+                        consecutive_empty = 0
                         sheet_rows.append(row_dict)
+                    else:
+                        consecutive_empty += 1
+                        if consecutive_empty > 30:
+                            break
+                            
                 if sheet_rows:
                     sheet_df = pd.DataFrame(sheet_rows)
                     cleaned_df = map_and_clean_df(sheet_df)
@@ -537,26 +624,29 @@ with st.sidebar.expander("📤 Actualizar Base de Datos (Subir Excel)", expanded
                     current_keys = set()
                     for _, row in current_df.iterrows():
                         f_str = pd.to_datetime(row['fecha']).strftime('%Y-%m-%d') if not pd.isna(row['fecha']) else ''
+                        prov = str(row['proveedor']).strip().upper() if 'proveedor' in row and not pd.isna(row['proveedor']) else ''
                         fc = str(row['nro_fc']).strip()
                         guia = str(row['guia']).strip()
                         prod = str(row['articulo_producto']).strip().upper()
                         var = str(row['articulo_variedad']).strip().upper()
                         cant = float(row['cantidad'])
-                        current_keys.add((f_str, fc, guia, prod, var, cant))
+                        current_keys.add((f_str, prov, fc, guia, prod, var, cant))
                         
                     # Filtrar únicamente los registros nuevos
                     rows_to_insert = []
                     for _, row in new_data_df.iterrows():
                         f_str = pd.to_datetime(row['fecha']).strftime('%Y-%m-%d') if not pd.isna(row['fecha']) else ''
+                        prov = str(row['proveedor']).strip().upper() if 'proveedor' in row and not pd.isna(row['proveedor']) else ''
                         fc = str(row['nro_fc']).strip()
                         guia = str(row['guia']).strip()
                         prod = str(row['articulo_producto']).strip().upper()
                         var = str(row['articulo_variedad']).strip().upper()
                         cant = float(row['cantidad'])
                         
-                        key = (f_str, fc, guia, prod, var, cant)
+                        key = (f_str, prov, fc, guia, prod, var, cant)
                         if key not in current_keys:
                             rows_to_insert.append(row)
+                            current_keys.add(key)
                             
                     if not rows_to_insert:
                         st.info("Todos los registros de los archivos subidos ya existen en la base de datos (0 filas nuevas cargadas).")
